@@ -45,29 +45,43 @@ class DistanceEstimator:
     ) -> Tuple[float, str, str]:
         """
         Estimates approximate distance in meters using pinhole camera geometry.
-        
+
+        NOTE: This is an APPROXIMATE geometric distance estimation based on object bounding-box
+        height relative to reference focal length and physical object dimensions. It is not an
+        exact real-world depth measurement.
+
         Formula:
-            Focal Length (scaled) = Reference Focal Length * (img_height / reference_img_height)
-            Distance (m) = (Real Height (m) * Focal Length) / Bounding Box Pixel Height
-        
+            Scaled Focal Length = Reference Focal Length * (img_height / reference_img_height)
+            Distance (m) = (Real Height (m) * Scaled Focal Length) / Bounding Box Height (px)
+
         Returns:
             (distance_m, distance_display, distance_quality)
         """
-        x1, y1, x2, y2 = bbox
-        box_height_px = max(float(y2 - y1), 1.0)
+        if not bbox or len(bbox) < 4:
+            return 0.0, "N/A", "unavailable"
 
-        # Scale focal length to match frame height if resolution changes
-        scale_factor = img_height / self.reference_img_height_px if img_height > 0 else 1.0
+        x1, y1, x2, y2 = bbox
+        box_height_px = float(y2 - y1)
+        box_width_px = float(x2 - x1)
+
+        # Defensive check for zero or negative bounding box size
+        if box_height_px <= 1.0 or box_width_px <= 1.0:
+            return 0.0, "N/A", "unavailable"
+
+        # Scale focal length dynamically based on frame image height
+        safe_img_height = max(float(img_height), 1.0)
+        scale_factor = safe_img_height / self.reference_img_height_px
         effective_focal_length = self.reference_focal_length_px * scale_factor
 
-        # Get real world height estimate for class
-        real_height_m = REFERENCE_HEIGHTS_M.get(class_name.lower(), DEFAULT_REFERENCE_HEIGHT_M)
+        # Obtain real-world reference height estimate for the object class
+        class_key = class_name.strip().lower() if isinstance(class_name, str) else "unknown"
+        real_height_m = REFERENCE_HEIGHTS_M.get(class_key, DEFAULT_REFERENCE_HEIGHT_M)
 
-        # Distance calculation
-        distance = (real_height_m * effective_focal_length) / box_height_px
-        distance_m = round(float(distance), 2)
-        
-        # Clamp distance to realistic range [0.1m, 50.0m]
+        # Calculate geometric distance (m)
+        raw_distance = (real_height_m * effective_focal_length) / box_height_px
+        distance_m = round(float(raw_distance), 1)
+
+        # Clamp distance to realistic physical range [0.1m, 50.0m]
         distance_m = max(0.1, min(distance_m, 50.0))
         distance_display = f"≈ {distance_m:.1f} m"
         distance_quality = "approximate"

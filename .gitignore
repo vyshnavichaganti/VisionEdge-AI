@@ -30,10 +30,11 @@ wheels/
 node_modules/
 frontend/dist/
 frontend/dist-ssr/
-*.local
+# Environment
 .env
 .env.local
 .env.*.local
+!.env.example
 
 # Models & Large Caches
 *.pt

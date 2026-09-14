@@ -1,8 +1,11 @@
+import logging
 import torch
 from ultralytics import YOLO
 import numpy as np
 from typing import List, Dict, Any, Optional
 from app.config import settings
+
+logger = logging.getLogger("visionedge.detection")
 
 class YOLODetector:
     _instance: Optional['YOLODetector'] = None
@@ -36,28 +39,32 @@ class YOLODetector:
         if image is None or image.size == 0:
             return []
 
-        with torch.inference_mode():
-            results = self.model.predict(
-                source=image,
-                conf=self.conf_threshold,
-                device="cpu",
-                verbose=False
-            )
+        try:
+            with torch.inference_mode():
+                results = self.model.predict(
+                    source=image,
+                    conf=self.conf_threshold,
+                    device="cpu",
+                    verbose=False
+                )
 
-        detections = []
-        if len(results) > 0 and results[0].boxes is not None:
-            boxes = results[0].boxes
-            for box in boxes:
-                xyxy = box.xyxy[0].cpu().numpy().tolist()
-                conf = float(box.conf[0].cpu().numpy())
-                cls_id = int(box.cls[0].cpu().numpy())
-                cls_name = self.model.names.get(cls_id, f"class_{cls_id}")
+            detections = []
+            if len(results) > 0 and results[0].boxes is not None:
+                boxes = results[0].boxes
+                for box in boxes:
+                    xyxy = box.xyxy[0].cpu().numpy().tolist()
+                    conf = float(box.conf[0].cpu().numpy())
+                    cls_id = int(box.cls[0].cpu().numpy())
+                    cls_name = self.model.names.get(cls_id, f"class_{cls_id}")
 
-                detections.append({
-                    "object_name": cls_name,
-                    "confidence": round(conf, 4),
-                    "bbox": [round(coord, 2) for coord in xyxy],
-                    "cls_id": cls_id
-                })
+                    detections.append({
+                        "object_name": cls_name,
+                        "confidence": round(conf, 4),
+                        "bbox": [round(coord, 2) for coord in xyxy],
+                        "cls_id": cls_id
+                    })
 
-        return detections
+            return detections
+        except Exception as e:
+            logger.error(f"YOLO predict error: {e}", exc_info=True)
+            return []

@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { Camera, VideoOff, RefreshCw, Zap, Circle } from 'lucide-react';
+import { Camera, VideoOff, RefreshCw, Circle } from 'lucide-react';
 import { detectObjects, resetTracking, DetectionObject, SummaryData } from '../services/api';
+import { TemporalTracker } from '../utils/temporalTracker';
 
 interface LiveCameraProps {
   onDetectionsUpdate: (objects: DetectionObject[], summary: SummaryData) => void;
@@ -15,8 +16,12 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const isProcessingRef = useRef<boolean>(false);
+
+  const latestDetectionsRef = useRef<DetectionObject[]>([]);
+  const temporalTrackerRef = useRef<TemporalTracker>(new TemporalTracker());
 
   const [fps, setFps] = useState<number>(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -26,6 +31,8 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
   const startCamera = async () => {
     try {
       setErrorMsg(null);
+      latestDetectionsRef.current = [];
+      temporalTrackerRef.current.reset();
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }
       });
@@ -43,6 +50,8 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
 
   const stopCamera = () => {
     setIsStreaming(false);
+    latestDetectionsRef.current = [];
+    temporalTrackerRef.current.reset();
     if (videoRef.current && videoRef.current.srcObject) {
       const stream = videoRef.current.srcObject as MediaStream;
       stream.getTracks().forEach((track) => track.stop());
@@ -62,9 +71,19 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
 
   const handleResetTracking = async () => {
     try {
+      setErrorMsg(null);
       await resetTracking();
-    } catch (e) {
+      latestDetectionsRef.current = [];
+      temporalTrackerRef.current.reset();
+      onDetectionsUpdate([], {
+        total_objects: 0,
+        people_count: 0,
+        scene_status: 'Clear',
+        tracking_status: 'Active (ByteTrack)'
+      });
+    } catch (e: any) {
       console.error('Reset tracking failed:', e);
+      setErrorMsg('Reset tracking request failed.');
     }
   };
 
@@ -76,42 +95,55 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
     videoWidth: number,
     videoHeight: number
   ) => {
-    const scaleX = canvasWidth / videoWidth;
-    const scaleY = canvasHeight / videoHeight;
+    if (!objects || objects.length === 0) return;
+
+    const scaleX = videoWidth > 0 ? canvasWidth / videoWidth : 1.0;
+    const scaleY = videoHeight > 0 ? canvasHeight / videoHeight : 1.0;
 
     objects.forEach((obj) => {
+      if (!obj.bbox || obj.bbox.length < 4) return;
       const [x1, y1, x2, y2] = obj.bbox;
-      const rx1 = x1 * scaleX;
-      const ry1 = y1 * scaleY;
-      const rw = (x2 - x1) * scaleX;
-      const rh = (y2 - y1) * scaleY;
+
+      const rx1 = Math.max(0, x1 * scaleX);
+      const ry1 = Math.max(0, y1 * scaleY);
+      const rw = Math.min(canvasWidth - rx1, (x2 - x1) * scaleX);
+      const rh = Math.min(canvasHeight - ry1, (y2 - y1) * scaleY);
+
+      if (rw <= 2 || rh <= 2) return;
 
       // Draw elegant bounding box
       ctx.lineWidth = 3;
       ctx.strokeStyle = '#C5A059'; // Gold Accent
       ctx.beginPath();
-      ctx.roundRect ? ctx.roundRect(rx1, ry1, rw, rh, 6) : ctx.rect(rx1, ry1, rw, rh);
+      if (typeof (ctx as any).roundRect === 'function') {
+        (ctx as any).roundRect(rx1, ry1, rw, rh, 6);
+      } else {
+        ctx.rect(rx1, ry1, rw, rh);
+      }
       ctx.stroke();
 
-      // Label badge
-      const trackTag = obj.track_id !== null ? `#${obj.track_id} ` : '';
+      // Label badge text: e.g. "Person | 85% | ID #1 | ≈ 3.3 m"
+      const capitalizedName = obj.object_name.charAt(0).toUpperCase() + obj.object_name.slice(1);
       const confPercent = Math.round(obj.confidence * 100);
-      const labelText = `${trackTag}${obj.object_name} (${confPercent}%) | ${obj.distance_display}`;
+      const trackTag = obj.track_id !== null ? ` | ID #${obj.track_id}` : '';
+      const labelText = `${capitalizedName} | ${confPercent}%${trackTag} | ${obj.distance_display}`;
 
       ctx.font = '600 13px Inter, sans-serif';
       const textMetrics = ctx.measureText(labelText);
       const bgWidth = textMetrics.width + 16;
       const bgHeight = 24;
 
+      // Prevent label background from going off canvas edges
+      const labelX = Math.max(0, Math.min(rx1, canvasWidth - bgWidth));
       const labelY = ry1 - bgHeight >= 0 ? ry1 - bgHeight : ry1;
 
       // Gold badge background
       ctx.fillStyle = '#C5A059';
-      ctx.fillRect(rx1, labelY, bgWidth, bgHeight);
+      ctx.fillRect(labelX, labelY, bgWidth, bgHeight);
 
-      // Dark text on gold badge for high contrast
+      // High-contrast dark text on gold badge
       ctx.fillStyle = '#171717';
-      ctx.fillText(labelText, rx1 + 8, labelY + 16);
+      ctx.fillText(labelText, labelX + 8, labelY + 16);
     });
   };
 
@@ -133,43 +165,96 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
       canvas.height = video.videoHeight || 480;
     }
 
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // 1. Clear transparent overlay canvas before rendering bounding boxes
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // 2. Render latest temporally-smoothed detections on overlay canvas
+    drawDetections(
+      ctx,
+      latestDetectionsRef.current,
+      canvas.width,
+      canvas.height,
+      video.videoWidth,
+      video.videoHeight
+    );
+
+    // Update FPS counter
+    frameCountRef.current += 1;
+    const now = performance.now();
+    if (now - lastTimeRef.current >= 1000) {
+      setFps(frameCountRef.current);
+      frameCountRef.current = 0;
+      lastTimeRef.current = now;
+    }
+
+    // 3. Capture raw video frame via offscreen canvas to avoid sending bounding box artifacts
     if (!isProcessingRef.current) {
       isProcessingRef.current = true;
-      canvas.toBlob(
-        async (blob) => {
-          if (blob && isStreaming) {
-            try {
-              const response = await detectObjects(blob);
-              onDetectionsUpdate(response.objects, response.summary);
 
-              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-              drawDetections(
-                ctx,
-                response.objects,
-                canvas.width,
-                canvas.height,
-                video.videoWidth,
-                video.videoHeight
-              );
+      if (!offscreenCanvasRef.current) {
+        offscreenCanvasRef.current = document.createElement('canvas');
+      }
+      const offCanvas = offscreenCanvasRef.current;
+      if (offCanvas.width !== video.videoWidth || offCanvas.height !== video.videoHeight) {
+        offCanvas.width = video.videoWidth || 640;
+        offCanvas.height = video.videoHeight || 480;
+      }
+      const offCtx = offCanvas.getContext('2d');
+      if (offCtx) {
+        offCtx.drawImage(video, 0, 0, offCanvas.width, offCanvas.height);
+        offCanvas.toBlob(
+          async (blob) => {
+            if (blob && isStreaming) {
+              try {
+                const response = await detectObjects(blob);
 
-              frameCountRef.current += 1;
-              const now = performance.now();
-              if (now - lastTimeRef.current >= 1000) {
-                setFps(frameCountRef.current);
-                frameCountRef.current = 0;
-                lastTimeRef.current = now;
+                // Pass raw detections through temporal tracker for smoothing & grace period
+                const stabilized = temporalTrackerRef.current.update(response.objects);
+                latestDetectionsRef.current = stabilized;
+
+                // Development debug logging
+                if (import.meta.env.DEV && response.objects.length > 0) {
+                  console.log('[VisionEdge AI Dev Log]', {
+                    sourceWidth: video.videoWidth,
+                    sourceHeight: video.videoHeight,
+                    canvasWidth: canvas.width,
+                    canvasHeight: canvas.height,
+                    rawDetectionsCount: response.objects.length,
+                    stabilizedCount: stabilized.length,
+                    firstBbox: response.objects[0].bbox,
+                    firstTrackId: response.objects[0].track_id,
+                  });
+                }
+
+                // Compute updated summary based on stabilized objects
+                const peopleCount = stabilized.filter(o => o.object_name.toLowerCase() === 'person').length;
+                const totalObjs = stabilized.length;
+                const sceneStatus = totalObjs === 0 ? 'Clear' : totalObjs <= 4 ? 'Active' : 'Crowded';
+
+                const updatedSummary: SummaryData = {
+                  total_objects: totalObjs,
+                  people_count: peopleCount,
+                  scene_status: sceneStatus,
+                  tracking_status: 'Active (ByteTrack)'
+                };
+
+                onDetectionsUpdate(stabilized, updatedSummary);
+                setErrorMsg(null);
+              } catch (err: any) {
+                console.error('Frame detection error:', err);
+                if (err.message && err.message.includes('offline')) {
+                  setErrorMsg('AI Backend Offline. Retrying...');
+                }
               }
-            } catch (err) {
-              console.error('Frame detection error:', err);
             }
-          }
-          isProcessingRef.current = false;
-        },
-        'image/jpeg',
-        0.8
-      );
+            isProcessingRef.current = false;
+          },
+          'image/jpeg',
+          0.85
+        );
+      } else {
+        isProcessingRef.current = false;
+      }
     }
 
     if (isStreaming) {
@@ -206,7 +291,7 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
       </div>
 
       <div className="camera-stage">
-        <video ref={videoRef} className="camera-video" style={{ display: 'none' }} playsInline muted />
+        <video ref={videoRef} className="camera-video" playsInline muted />
         <canvas ref={canvasRef} className="camera-canvas" />
 
         {!isStreaming && (

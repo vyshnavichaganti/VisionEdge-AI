@@ -23,3 +23,27 @@ def test_bytetrack_manager_singleton():
     tracker1 = get_tracker_manager()
     tracker2 = get_tracker_manager()
     assert tracker1 is tracker2
+
+def test_tracking_sequence_and_reset_recovery():
+    """Verify that calling track_objects -> reset_tracking -> track_objects does NOT throw IndexError."""
+    tracker = get_tracker_manager()
+    frame = np.ones((480, 640, 3), dtype=np.uint8) * 200
+
+    # First track call
+    res1 = tracker.track_objects(frame)
+    assert isinstance(res1, list)
+
+    # Reset tracking session
+    reset_ok = tracker.reset_tracking()
+    assert reset_ok is True
+
+    # Second track call must succeed without IndexError
+    res2 = tracker.track_objects(frame)
+    assert isinstance(res2, list)
+
+def test_tracking_empty_frame():
+    """Verify tracking handles empty/blank frames with zero detections cleanly."""
+    tracker = get_tracker_manager()
+    blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    res = tracker.track_objects(blank_frame)
+    assert isinstance(res, list)
