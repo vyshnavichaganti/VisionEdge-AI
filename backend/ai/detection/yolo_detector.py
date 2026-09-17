@@ -44,6 +44,7 @@ class YOLODetector:
                 results = self.model.predict(
                     source=image,
                     conf=self.conf_threshold,
+                    imgsz=settings.IMG_SIZE,
                     device="cpu",
                     verbose=False
                 )

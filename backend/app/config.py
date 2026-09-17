@@ -18,6 +18,7 @@ class Settings:
     # AI Model settings
     MODEL_NAME: str = os.getenv("MODEL_NAME", "yolov8n.pt")
     CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", 0.25))
+    IMG_SIZE: int = int(os.getenv("IMG_SIZE", 320))
     
     # Camera / Distance estimation reference focal length (in pixels)
     # Default calibrated value for standard webcam at 640x480 resolution

@@ -9,6 +9,9 @@ interface LiveCameraProps {
   setIsStreaming: (active: boolean) => void;
 }
 
+const MIN_DETECTION_INTERVAL_MS = 100; // Max 10 requests per second throttle
+const TARGET_MAX_WIDTH = 480; // Resize frame width to max 480px for faster transport & inference
+
 export const LiveCamera: React.FC<LiveCameraProps> = ({
   onDetectionsUpdate,
   isStreaming,
@@ -22,11 +25,16 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
 
   const latestDetectionsRef = useRef<DetectionObject[]>([]);
   const temporalTrackerRef = useRef<TemporalTracker>(new TemporalTracker());
+  const sentDimensionsRef = useRef<{ width: number; height: number }>({ width: 640, height: 480 });
 
-  const [fps, setFps] = useState<number>(0);
+  const [renderFps, setRenderFps] = useState<number>(0);
+  const [aiFps, setAiFps] = useState<number>(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
   const lastTimeRef = useRef<number>(performance.now());
   const frameCountRef = useRef<number>(0);
+  const aiFrameCountRef = useRef<number>(0);
+  const lastDetectionTimeRef = useRef<number>(0);
 
   const startCamera = async () => {
     try {
@@ -52,6 +60,8 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
     setIsStreaming(false);
     latestDetectionsRef.current = [];
     temporalTrackerRef.current.reset();
+    setRenderFps(0);
+    setAiFps(0);
     if (videoRef.current && videoRef.current.srcObject) {
       const stream = videoRef.current.srcObject as MediaStream;
       stream.getTracks().forEach((track) => track.stop());
@@ -92,13 +102,13 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
     objects: DetectionObject[],
     canvasWidth: number,
     canvasHeight: number,
-    videoWidth: number,
-    videoHeight: number
+    frameWidth: number,
+    frameHeight: number
   ) => {
     if (!objects || objects.length === 0) return;
 
-    const scaleX = videoWidth > 0 ? canvasWidth / videoWidth : 1.0;
-    const scaleY = videoHeight > 0 ? canvasHeight / videoHeight : 1.0;
+    const scaleX = frameWidth > 0 ? canvasWidth / frameWidth : 1.0;
+    const scaleY = frameHeight > 0 ? canvasHeight / frameHeight : 1.0;
 
     objects.forEach((obj) => {
       if (!obj.bbox || obj.bbox.length < 4) return;
@@ -174,39 +184,52 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
       latestDetectionsRef.current,
       canvas.width,
       canvas.height,
-      video.videoWidth,
-      video.videoHeight
+      sentDimensionsRef.current.width,
+      sentDimensionsRef.current.height
     );
 
-    // Update FPS counter
+    // Update FPS counters
     frameCountRef.current += 1;
     const now = performance.now();
     if (now - lastTimeRef.current >= 1000) {
-      setFps(frameCountRef.current);
+      setRenderFps(frameCountRef.current);
+      setAiFps(aiFrameCountRef.current);
       frameCountRef.current = 0;
+      aiFrameCountRef.current = 0;
       lastTimeRef.current = now;
     }
 
-    // 3. Capture raw video frame via offscreen canvas to avoid sending bounding box artifacts
-    if (!isProcessingRef.current) {
+    // 3. Capture raw video frame with throttling & in-flight request lock
+    if (!isProcessingRef.current && (now - lastDetectionTimeRef.current >= MIN_DETECTION_INTERVAL_MS)) {
       isProcessingRef.current = true;
+      lastDetectionTimeRef.current = now;
 
       if (!offscreenCanvasRef.current) {
         offscreenCanvasRef.current = document.createElement('canvas');
       }
       const offCanvas = offscreenCanvasRef.current;
-      if (offCanvas.width !== video.videoWidth || offCanvas.height !== video.videoHeight) {
-        offCanvas.width = video.videoWidth || 640;
-        offCanvas.height = video.videoHeight || 480;
+
+      const videoW = video.videoWidth || 640;
+      const videoH = video.videoHeight || 480;
+      const aspect = videoH / videoW;
+      const sendW = Math.min(videoW, TARGET_MAX_WIDTH);
+      const sendH = Math.round(sendW * aspect);
+
+      sentDimensionsRef.current = { width: sendW, height: sendH };
+
+      if (offCanvas.width !== sendW || offCanvas.height !== sendH) {
+        offCanvas.width = sendW;
+        offCanvas.height = sendH;
       }
       const offCtx = offCanvas.getContext('2d');
       if (offCtx) {
-        offCtx.drawImage(video, 0, 0, offCanvas.width, offCanvas.height);
+        offCtx.drawImage(video, 0, 0, sendW, sendH);
         offCanvas.toBlob(
           async (blob) => {
-            if (blob && isStreaming) {
-              try {
+            try {
+              if (blob && isStreaming) {
                 const response = await detectObjects(blob);
+                aiFrameCountRef.current += 1;
 
                 // Pass raw detections through temporal tracker for smoothing & grace period
                 const stabilized = temporalTrackerRef.current.update(response.objects);
@@ -217,8 +240,8 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
                   console.log('[VisionEdge AI Dev Log]', {
                     sourceWidth: video.videoWidth,
                     sourceHeight: video.videoHeight,
-                    canvasWidth: canvas.width,
-                    canvasHeight: canvas.height,
+                    sendWidth: sendW,
+                    sendHeight: sendH,
                     rawDetectionsCount: response.objects.length,
                     stabilizedCount: stabilized.length,
                     firstBbox: response.objects[0].bbox,
@@ -240,17 +263,18 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
 
                 onDetectionsUpdate(stabilized, updatedSummary);
                 setErrorMsg(null);
-              } catch (err: any) {
-                console.error('Frame detection error:', err);
-                if (err.message && err.message.includes('offline')) {
-                  setErrorMsg('AI Backend Offline. Retrying...');
-                }
               }
+            } catch (err: any) {
+              console.error('Frame detection error:', err);
+              if (err.message && err.message.includes('offline')) {
+                setErrorMsg('AI Backend Offline. Retrying...');
+              }
+            } finally {
+              isProcessingRef.current = false;
             }
-            isProcessingRef.current = false;
           },
           'image/jpeg',
-          0.85
+          0.70
         );
       } else {
         isProcessingRef.current = false;
@@ -281,7 +305,7 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
         <span>Live Camera View</span>
         {isStreaming ? (
           <span className="status-pill status-live">
-            <Circle className="w-2.5 h-2.5 fill-current inline" /> LIVE ({fps} FPS)
+            <Circle className="w-2.5 h-2.5 fill-current inline" /> LIVE ({renderFps} FPS | AI: {aiFps} FPS)
           </span>
         ) : (
           <span className="status-pill status-neutral">

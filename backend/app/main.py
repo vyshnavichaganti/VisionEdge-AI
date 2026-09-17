@@ -131,6 +131,7 @@ async def detect_objects(file: UploadFile = File(...)):
 
         end_time = time.perf_counter()
         inference_ms = round((end_time - start_time) * 1000, 2)
+        logger.info(f"Detection completed in {inference_ms}ms (objects: {len(objects_output)})")
 
         total_objs = len(objects_output)
         if total_objs == 0:

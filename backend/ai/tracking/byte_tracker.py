@@ -36,6 +36,7 @@ class ByteTrackerManager:
                 results = self.detector.model.track(
                     source=image,
                     conf=settings.CONFIDENCE_THRESHOLD,
+                    imgsz=settings.IMG_SIZE,
                     tracker="bytetrack.yaml",
                     persist=True,
                     device="cpu",
