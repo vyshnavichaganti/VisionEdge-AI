@@ -33,7 +33,11 @@ export interface ReadyResponse {
   device: string;
 }
 
-const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const rawApiUrl =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.PROD
+    ? 'https://visionedge-ai-4jrg.onrender.com'
+    : 'http://localhost:8000');
 const API_BASE_URL = rawApiUrl.replace(/\/+$/, '');
 
 export async function detectObjects(imageBlob: Blob): Promise<DetectionResponse> {

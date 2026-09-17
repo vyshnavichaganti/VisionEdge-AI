@@ -28,6 +28,18 @@ REFERENCE_HEIGHTS_M: Dict[str, float] = {
     "suitcase": 0.60,
     "clock": 0.25,
     "vase": 0.30,
+    "remote": 0.18,
+    "keyboard": 0.15,
+    "mouse": 0.08,
+    "apple": 0.08,
+    "banana": 0.15,
+    "scissors": 0.18,
+    "sports ball": 0.22,
+    "wine glass": 0.20,
+    "spoon": 0.15,
+    "fork": 0.15,
+    "knife": 0.15,
+    "bowl": 0.12,
 }
 
 DEFAULT_REFERENCE_HEIGHT_M = 0.50
