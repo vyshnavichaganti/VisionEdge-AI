@@ -34,10 +34,7 @@ export interface ReadyResponse {
 }
 
 const rawApiUrl =
-  import.meta.env.VITE_API_URL ||
-  (import.meta.env.PROD
-    ? 'https://visionedge-ai-4jrg.onrender.com'
-    : 'http://localhost:8000');
+  import.meta.env.VITE_API_URL || 'https://visionedge-ai-4jrg.onrender.com';
 const API_BASE_URL = rawApiUrl.replace(/\/+$/, '');
 
 export async function detectObjects(imageBlob: Blob): Promise<DetectionResponse> {
