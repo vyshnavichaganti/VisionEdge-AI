@@ -9,7 +9,7 @@ interface LiveCameraProps {
   setIsStreaming: (active: boolean) => void;
 }
 
-const MIN_DETECTION_INTERVAL_MS = 100; // Max 10 requests per second throttle
+const MIN_DETECTION_INTERVAL_MS = 200; // Throttle limit: ~5 requests per second max (aligns with Render CPU 3-5 FPS)
 const TARGET_MAX_WIDTH = 480; // Resize frame width to max 480px for faster transport & inference
 
 export const LiveCamera: React.FC<LiveCameraProps> = ({

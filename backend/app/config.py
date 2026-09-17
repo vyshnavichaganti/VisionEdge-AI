@@ -17,7 +17,7 @@ class Settings:
     
     # AI Model settings
     MODEL_NAME: str = os.getenv("MODEL_NAME", "yolov8n.pt")
-    CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", 0.25))
+    CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", 0.35))
     IMG_SIZE: int = int(os.getenv("IMG_SIZE", 320))
     
     # Camera / Distance estimation reference focal length (in pixels)
