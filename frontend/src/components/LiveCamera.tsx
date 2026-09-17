@@ -255,7 +255,7 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
 
         if (detector.isModelLoaded()) {
           // Primary Path: Fast local browser-side ONNX WebGL/WASM detection
-          rawDetections = await detector.detect(video, 0.35, 0.45);
+          rawDetections = await detector.detect(video, 0.30, 0.45);
           aiFrameCountRef.current += 1;
           sentDimensionsRef.current = { width: video.videoWidth || 640, height: video.videoHeight || 480 };
         } else {

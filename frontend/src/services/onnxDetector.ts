@@ -61,7 +61,8 @@ export class ONNXDetector {
   private loadError: string | null = null;
 
   private constructor() {
-    // Configure ONNX Runtime WASM threads defensively for cross-origin environments
+    // Configure ONNX Runtime WASM static assets path and single-thread execution
+    ort.env.wasm.wasmPaths = '/wasm/';
     ort.env.wasm.numThreads = 1;
   }
 
@@ -121,7 +122,7 @@ export class ONNXDetector {
    */
   public async detect(
     sourceElement: HTMLVideoElement | HTMLCanvasElement,
-    confThreshold: number = 0.35,
+    confThreshold: number = 0.30,
     iouThreshold: number = 0.45
   ): Promise<DetectionObject[]> {
     if (!this.session) {
@@ -144,8 +145,19 @@ export class ONNXDetector {
     const ctx = this.offscreenCtx;
     if (!ctx) return [];
 
-    // Draw frame scaled to 320x320
-    ctx.drawImage(sourceElement, 0, 0, MODEL_IMG_SIZE, MODEL_IMG_SIZE);
+    // Calculate aspect ratio preserving letterbox scale and padding offsets
+    const scale = Math.min(MODEL_IMG_SIZE / srcWidth, MODEL_IMG_SIZE / srcHeight);
+    const newW = Math.round(srcWidth * scale);
+    const newH = Math.round(srcHeight * scale);
+    const padX = (MODEL_IMG_SIZE - newW) / 2;
+    const padY = (MODEL_IMG_SIZE - newH) / 2;
+
+    // Fill 320x320 canvas with standard YOLO letterbox neutral gray (RGB 114, 114, 114)
+    ctx.fillStyle = 'rgb(114, 114, 114)';
+    ctx.fillRect(0, 0, MODEL_IMG_SIZE, MODEL_IMG_SIZE);
+
+    // Draw frame scaled and centered with letterbox padding
+    ctx.drawImage(sourceElement, padX, padY, newW, newH);
     const imageData = ctx.getImageData(0, 0, MODEL_IMG_SIZE, MODEL_IMG_SIZE);
     const { data } = imageData; // 320 * 320 * 4 RGBA bytes
 
@@ -180,9 +192,6 @@ export class ONNXDetector {
     const numAnchors = 2100;
     const numRows = 84;
 
-    const scaleX = srcWidth / MODEL_IMG_SIZE;
-    const scaleY = srcHeight / MODEL_IMG_SIZE;
-
     for (let col = 0; col < numAnchors; col++) {
       // Find highest class confidence score among rows 4..83
       let maxScore = 0;
@@ -202,10 +211,20 @@ export class ONNXDetector {
         const w = outputData[2 * numAnchors + col];
         const h = outputData[3 * numAnchors + col];
 
-        const x1 = Math.max(0, (cx - w / 2) * scaleX);
-        const y1 = Math.max(0, (cy - h / 2) * scaleY);
-        const x2 = Math.min(srcWidth, (cx + w / 2) * scaleX);
-        const y2 = Math.min(srcHeight, (cy + h / 2) * scaleY);
+        // Unpad and scale back to original video dimensions
+        const cxUnpad = cx - padX;
+        const cyUnpad = cy - padY;
+
+        const srcCx = cxUnpad / scale;
+        const srcCy = cyUnpad / scale;
+        const srcW = w / scale;
+        const srcH = h / scale;
+
+        // Clip corner coordinates to original video bounds [0, srcWidth] and [0, srcHeight]
+        const x1 = Math.max(0, Math.min(srcWidth, srcCx - srcW / 2));
+        const y1 = Math.max(0, Math.min(srcHeight, srcCy - srcH / 2));
+        const x2 = Math.max(0, Math.min(srcWidth, srcCx + srcW / 2));
+        const y2 = Math.max(0, Math.min(srcHeight, srcCy + srcH / 2));
 
         const clsName = COCO_CLASSES[maxClsId] || `class_${maxClsId}`;
 
