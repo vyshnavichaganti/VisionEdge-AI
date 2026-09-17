@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { Camera, VideoOff, RefreshCw, Circle } from 'lucide-react';
+import { Camera, VideoOff, RefreshCw, Circle, Cpu, AlertTriangle } from 'lucide-react';
 import { detectObjects, resetTracking, DetectionObject, SummaryData } from '../services/api';
+import { ONNXDetector } from '../services/onnxDetector';
 import { TemporalTracker } from '../utils/temporalTracker';
 
 interface LiveCameraProps {
@@ -9,8 +10,8 @@ interface LiveCameraProps {
   setIsStreaming: (active: boolean) => void;
 }
 
-const MIN_DETECTION_INTERVAL_MS = 200; // Throttle limit: ~5 requests per second max (aligns with Render CPU 3-5 FPS)
-const TARGET_MAX_WIDTH = 480; // Resize frame width to max 480px for faster transport & inference
+const MIN_DETECTION_INTERVAL_MS = 50; // ~20 FPS target processing rate for client-side ONNX Web
+const TARGET_MAX_WIDTH = 480; // Downscaling limit for optional fallback API call
 
 export const LiveCamera: React.FC<LiveCameraProps> = ({
   onDetectionsUpdate,
@@ -29,6 +30,8 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
 
   const [renderFps, setRenderFps] = useState<number>(0);
   const [aiFps, setAiFps] = useState<number>(0);
+  const [modelLoading, setModelLoading] = useState<boolean>(false);
+  const [modelError, setModelError] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const lastTimeRef = useRef<number>(performance.now());
@@ -36,14 +39,57 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
   const aiFrameCountRef = useRef<number>(0);
   const lastDetectionTimeRef = useRef<number>(0);
 
+  // Pre-load ONNX model on component mount
+  useEffect(() => {
+    let isMounted = true;
+    const initONNX = async () => {
+      const detector = ONNXDetector.getInstance();
+      if (!detector.isModelLoaded() && !detector.isModelLoading()) {
+        if (isMounted) setModelLoading(true);
+        try {
+          await detector.initModel('/models/yolov8n.onnx');
+          if (isMounted) {
+            setModelLoading(false);
+            setModelError(null);
+          }
+        } catch (err: any) {
+          console.warn('[LiveCamera] ONNX Model failed to load, fallback to server API:', err);
+          if (isMounted) {
+            setModelLoading(false);
+            setModelError('Local ONNX model load failed. Cloud API fallback enabled.');
+          }
+        }
+      }
+    };
+    initONNX();
+    return () => { isMounted = false; };
+  }, []);
+
   const startCamera = async () => {
     try {
       setErrorMsg(null);
       latestDetectionsRef.current = [];
       temporalTrackerRef.current.reset();
+
+      // Ensure model is initializing
+      const detector = ONNXDetector.getInstance();
+      if (!detector.isModelLoaded() && !detector.isModelLoading()) {
+        setModelLoading(true);
+        detector.initModel('/models/yolov8n.onnx')
+          .then(() => {
+            setModelLoading(false);
+            setModelError(null);
+          })
+          .catch((err) => {
+            setModelLoading(false);
+            setModelError('Local ONNX load failed. Falling back to server API.');
+          });
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }
       });
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
@@ -82,14 +128,14 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
   const handleResetTracking = async () => {
     try {
       setErrorMsg(null);
-      await resetTracking();
+      await resetTracking().catch(() => {}); // Optional call to backend reset
       latestDetectionsRef.current = [];
       temporalTrackerRef.current.reset();
       onDetectionsUpdate([], {
         total_objects: 0,
         people_count: 0,
         scene_status: 'Clear',
-        tracking_status: 'Active (ByteTrack)'
+        tracking_status: 'Active (ONNX + ByteTrack)'
       });
     } catch (e: any) {
       console.error('Reset tracking failed:', e);
@@ -121,7 +167,7 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
 
       if (rw <= 2 || rh <= 2) return;
 
-      // Draw elegant bounding box
+      // Draw bounding box
       ctx.lineWidth = 3;
       ctx.strokeStyle = '#C5A059'; // Gold Accent
       ctx.beginPath();
@@ -143,7 +189,6 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
       const bgWidth = textMetrics.width + 16;
       const bgHeight = 24;
 
-      // Prevent label background from going off canvas edges
       const labelX = Math.max(0, Math.min(rx1, canvasWidth - bgWidth));
       const labelY = ry1 - bgHeight >= 0 ? ry1 - bgHeight : ry1;
 
@@ -151,7 +196,7 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
       ctx.fillStyle = '#C5A059';
       ctx.fillRect(labelX, labelY, bgWidth, bgHeight);
 
-      // High-contrast dark text on gold badge
+      // Dark text on gold badge
       ctx.fillStyle = '#171717';
       ctx.fillText(labelText, labelX + 8, labelY + 16);
     });
@@ -175,10 +220,10 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
       canvas.height = video.videoHeight || 480;
     }
 
-    // 1. Clear transparent overlay canvas before rendering bounding boxes
+    // Clear overlay canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // 2. Render latest temporally-smoothed detections on overlay canvas
+    // Render detections
     drawDetections(
       ctx,
       latestDetectionsRef.current,
@@ -199,84 +244,70 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
       lastTimeRef.current = now;
     }
 
-    // 3. Capture raw video frame with throttling & in-flight request lock
+    // Capture & Detect loop with lock and throttle
     if (!isProcessingRef.current && (now - lastDetectionTimeRef.current >= MIN_DETECTION_INTERVAL_MS)) {
       isProcessingRef.current = true;
       lastDetectionTimeRef.current = now;
 
-      if (!offscreenCanvasRef.current) {
-        offscreenCanvasRef.current = document.createElement('canvas');
-      }
-      const offCanvas = offscreenCanvasRef.current;
+      try {
+        let rawDetections: DetectionObject[] = [];
+        const detector = ONNXDetector.getInstance();
 
-      const videoW = video.videoWidth || 640;
-      const videoH = video.videoHeight || 480;
-      const aspect = videoH / videoW;
-      const sendW = Math.min(videoW, TARGET_MAX_WIDTH);
-      const sendH = Math.round(sendW * aspect);
+        if (detector.isModelLoaded()) {
+          // Primary Path: Fast local browser-side ONNX WebGL/WASM detection
+          rawDetections = await detector.detect(video, 0.35, 0.45);
+          aiFrameCountRef.current += 1;
+          sentDimensionsRef.current = { width: video.videoWidth || 640, height: video.videoHeight || 480 };
+        } else {
+          // Fallback Path: Remote server API
+          if (!offscreenCanvasRef.current) {
+            offscreenCanvasRef.current = document.createElement('canvas');
+          }
+          const offCanvas = offscreenCanvasRef.current;
+          const videoW = video.videoWidth || 640;
+          const videoH = video.videoHeight || 480;
+          const aspect = videoH / videoW;
+          const sendW = Math.min(videoW, TARGET_MAX_WIDTH);
+          const sendH = Math.round(sendW * aspect);
 
-      sentDimensionsRef.current = { width: sendW, height: sendH };
+          sentDimensionsRef.current = { width: sendW, height: sendH };
 
-      if (offCanvas.width !== sendW || offCanvas.height !== sendH) {
-        offCanvas.width = sendW;
-        offCanvas.height = sendH;
-      }
-      const offCtx = offCanvas.getContext('2d');
-      if (offCtx) {
-        offCtx.drawImage(video, 0, 0, sendW, sendH);
-        offCanvas.toBlob(
-          async (blob) => {
-            try {
-              if (blob && isStreaming) {
-                const response = await detectObjects(blob);
-                aiFrameCountRef.current += 1;
-
-                // Pass raw detections through temporal tracker for smoothing & grace period
-                const stabilized = temporalTrackerRef.current.update(response.objects);
-                latestDetectionsRef.current = stabilized;
-
-                // Development debug logging
-                if (import.meta.env.DEV && response.objects.length > 0) {
-                  console.log('[VisionEdge AI Dev Log]', {
-                    sourceWidth: video.videoWidth,
-                    sourceHeight: video.videoHeight,
-                    sendWidth: sendW,
-                    sendHeight: sendH,
-                    rawDetectionsCount: response.objects.length,
-                    stabilizedCount: stabilized.length,
-                    firstBbox: response.objects[0].bbox,
-                    firstTrackId: response.objects[0].track_id,
-                  });
-                }
-
-                // Compute updated summary based on stabilized objects
-                const peopleCount = stabilized.filter(o => o.object_name.toLowerCase() === 'person').length;
-                const totalObjs = stabilized.length;
-                const sceneStatus = totalObjs === 0 ? 'Clear' : totalObjs <= 4 ? 'Active' : 'Crowded';
-
-                const updatedSummary: SummaryData = {
-                  total_objects: totalObjs,
-                  people_count: peopleCount,
-                  scene_status: sceneStatus,
-                  tracking_status: 'Active (ByteTrack)'
-                };
-
-                onDetectionsUpdate(stabilized, updatedSummary);
-                setErrorMsg(null);
-              }
-            } catch (err: any) {
-              console.error('Frame detection error:', err);
-              if (err.message && err.message.includes('offline')) {
-                setErrorMsg('AI Backend Offline. Retrying...');
-              }
-            } finally {
-              isProcessingRef.current = false;
+          if (offCanvas.width !== sendW || offCanvas.height !== sendH) {
+            offCanvas.width = sendW;
+            offCanvas.height = sendH;
+          }
+          const offCtx = offCanvas.getContext('2d');
+          if (offCtx) {
+            offCtx.drawImage(video, 0, 0, sendW, sendH);
+            const blob = await new Promise<Blob | null>((resolve) => offCanvas.toBlob(resolve, 'image/jpeg', 0.70));
+            if (blob && isStreaming) {
+              const response = await detectObjects(blob);
+              rawDetections = response.objects;
+              aiFrameCountRef.current += 1;
             }
-          },
-          'image/jpeg',
-          0.70
-        );
-      } else {
+          }
+        }
+
+        // Pass raw detections through temporal tracker for box smoothing & track ID assignment
+        const stabilized = temporalTrackerRef.current.update(rawDetections);
+        latestDetectionsRef.current = stabilized;
+
+        const peopleCount = stabilized.filter(o => o.object_name.toLowerCase() === 'person').length;
+        const totalObjs = stabilized.length;
+        const sceneStatus = totalObjs === 0 ? 'Clear' : totalObjs <= 4 ? 'Active' : 'Crowded';
+
+        const updatedSummary: SummaryData = {
+          total_objects: totalObjs,
+          people_count: peopleCount,
+          scene_status: sceneStatus,
+          tracking_status: detector.isModelLoaded() ? 'Active (ONNX WebGL)' : 'Active (Server Fallback)'
+        };
+
+        onDetectionsUpdate(stabilized, updatedSummary);
+        setErrorMsg(null);
+      } catch (err: any) {
+        console.error('Frame detection loop error:', err);
+      } finally {
         isProcessingRef.current = false;
       }
     }
@@ -318,7 +349,15 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
         <video ref={videoRef} className="camera-video" playsInline muted />
         <canvas ref={canvasRef} className="camera-canvas" />
 
-        {!isStreaming && (
+        {modelLoading && (
+          <div className="camera-placeholder" style={{ backgroundColor: 'rgba(0,0,0,0.7)', zIndex: 10 }}>
+            <Cpu className="w-10 h-10 animate-pulse" style={{ color: 'var(--accent-gold)' }} />
+            <p style={{ fontWeight: 600, color: '#FFFFFF', marginTop: '8px' }}>Initializing ONNX WebGL Model...</p>
+            <p style={{ fontSize: '12px', color: '#A3A3A3' }}>Downloading pre-trained COCO YOLO model (~12MB)</p>
+          </div>
+        )}
+
+        {!isStreaming && !modelLoading && (
           <div className="camera-placeholder">
             <Camera className="w-12 h-12" style={{ color: 'var(--accent-gold)' }} />
             <p style={{ fontWeight: 500, color: '#A3A3A3' }}>Camera Feed Standby</p>
@@ -326,15 +365,21 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({
         )}
       </div>
 
+      {modelError && (
+        <div className="status-pill status-amber" style={{ justifyContent: 'center', marginTop: '8px' }}>
+          <AlertTriangle className="w-4 h-4 inline mr-1" /> {modelError}
+        </div>
+      )}
+
       {errorMsg && (
-        <div className="status-pill status-red" style={{ justifyContent: 'center' }}>
+        <div className="status-pill status-red" style={{ justifyContent: 'center', marginTop: '8px' }}>
           {errorMsg}
         </div>
       )}
 
       <div className="camera-controls">
         {!isStreaming ? (
-          <button className="btn btn-primary" onClick={startCamera}>
+          <button className="btn btn-primary" onClick={startCamera} disabled={modelLoading}>
             <Camera className="w-4 h-4" /> Start Camera
           </button>
         ) : (
